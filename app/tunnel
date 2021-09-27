@@ -1,0 +1,78 @@
+#!/bin/sh
+
+# SSH Tunnel
+# - listens on $LISTENER (interface:port)
+# - forwards port to $DEST (host:port)
+
+set -ex
+
+mkdir -p /root/.ssh
+
+# Define the SSH config file so we keep the ssh cmds below small
+cat <<EOF > /root/.ssh/config
+LogLevel INFO
+CheckHostIP no
+StrictHostKeyChecking no
+UserKnownHostsFile /dev/null
+ServerAliveInterval 120
+ExitOnForwardFailure no
+
+Host $DEST
+  User root
+  IdentityFile /root/.ssh/id_rsa
+
+EOF
+
+# Copy the private key from our secret mounted to the /root/keys dir
+if [[ -f /root/keys/id_rsa ]]; then
+  cat /root/keys/id_rsa > /root/.ssh/id_rsa
+else
+  # if the mount wasn't there then see if the key is in the env var
+  set +x
+  echo $id_rsa | base64 -d > /root/.ssh/id_rsa
+  set -x
+fi
+echo >> /root/.ssh/id_rsa  # ensure there's a CR at the end
+chmod go-rwx /root/.ssh /root/.ssh/*  # can't be too visibkle
+
+# Setup tunnel from Code Engine to remote host/proxy.
+# Anything received on LISTEN_PORT in this CE job will be forwarded
+# to DEST_APP (host:port) on the remote host (DEST)
+
+export LISTENER=${LISTENER:-0.0.0.0:80}
+export DEST_APP=${DEST_APP:-example.com:80}
+export DEST=${DEST:-x.x.x.x}
+
+LISTENER_HOST=${LISTENER%:*}  # remove port, leave host
+LISTENER_PORT=${LISTENER##*:} # remove hostname, leave port
+
+UDP_FWD_PORT=${UDP_FWD_PORT##*:} # remove hostname, leave port
+UDP_FWD_HOST=${UDP_FWD_HOST%:*}  # remove port, leave host
+
+# -f -M
+( while true ; do ssh -N -L $LISTENER:$DEST_APP $DEST ; done) &
+sleep 2  # Just so the logging looks nice
+
+# Setup a UDP listener if asked
+if [[ -n "${UDP_PORT}" ]]; then
+  mkfifo /tmp/fifo
+  while true ; do
+    nc -vul -p $UDP_PORT < /tmp/fifo | nc -v $UDP_FWD_HOST $LISTENER_PORT > /tmp/fifo
+  done
+fi
+
+if [[ "$REV" == "yes" ]]; then
+  # Setup tunnel from remote host back to CE.
+  # Anything coming into remote host (DEST) on REV_LISTENER (interface:port)
+  # will be sent to REV_DEST_APP
+
+  export REV_LISTENER=${REV_LISTEN_PORT:-127.0.0.1:$TUNNEL_PORT}
+  export REV_DEST_APP=${REV_DEST_APP:-knative-local-gateway.istio-system:80}
+  
+  # -f -M
+  (while true ; do ssh -N -R $REV_LISTENER:$REV_DEST_APP $DEST ; done )&
+  sleep 2  # Just so the logging looks nice
+fi
+
+# Keep us alive forever
+while true ; do sleep 365d ; done

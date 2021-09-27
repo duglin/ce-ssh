@@ -1,0 +1,11 @@
+#!/bin/bash
+
+set -ex
+
+REGISTRY=duglin
+
+docker build -t $REGISTRY/sshtunnel-vm          -f Dockerfile.vm .
+docker build -t $REGISTRY/sshtunnel-udp-service -f Dockerfile.udp-service .
+
+docker push $REGISTRY/sshtunnel-vm
+docker push $REGISTRY/sshtunnel-udp-service

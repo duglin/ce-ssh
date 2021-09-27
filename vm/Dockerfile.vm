@@ -1,0 +1,4 @@
+FROM alpine
+RUN apk add --no-cache openssh curl dropbear
+COPY setup-vm /
+CMD /setup-vm

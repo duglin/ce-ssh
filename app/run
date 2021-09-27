@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# Env Vars:
+# REGISTRY: name of the image registry/namespace to get the images
+
+# Clean up previous run
+function clean() {
+  set +ex
+  echo Cleaning...
+  (
+  ibmcloud ce jobrun delete -n udp-client -f
+  ibmcloud ce jobrun delete -n tunnel -f
+  if which cekube ; then
+    cekube get pods | grep -e udp-client -e tunnel- | while read a b
+    do
+      cekube delete pod $a --force --grace-period=0
+    done
+  fi
+  ) > /dev/null 2>&1
+}
+
+function wait_for_job() {
+  set +x +e
+  while true ; do
+    sleep 1
+    IP=$(ibmcloud ce jobrun get -n $1 \
+	     -o jsonpath="{.instances[0].status.podIP}" 2> /dev/null) || true
+    [[ -n "$IP" ]] && echo $IP && break
+  done
+  set -x -e
+}
+
+clean
+[[ "$1" == "clean" ]] && exit 0
+
+set -ex
+export REGISTRY=${REGISTRY:-duglin}
+export TUNNEL_PORT=${TUNNEL_PORT:-8080}    # SSH tunnel tcp listen port
+export UDP_PORT=${UDP_PORT:-1234}          # UDP port to listen on (locally)
+export UDP_FWD_HOST=127.0.0.1:$TUNNEL_PORT # Where to send TCP traffic to
+export TCP_FWD_HOST=127.0.0.1:$UDP_PORT    # Where the tunnel sends things to
+export VM_IP=$(wait_for_job vm)            # IP of the VM we'll ssh to
+
+# Create the "tunnel". This job will act as a proxy for anything running
+# in our project to connect to our remote VM.
+CE_SUBDOMAIN=$(ibmcloud ce project current | sed -n "s/^Subdomain: *\([^ ]*\).*$/\1/p")
+ibmcloud ce jobrun submit -n tunnel \
+  --image $REGISTRY/sshtunnel-tunnel \
+  --env-from-secret ssh-key \
+  -e CE_EXECUTION_MODE=DAEMON \
+  -e LISTENER=0.0.0.0:$TUNNEL_PORT \
+  -e UDP_PORT=$UDP_PORT \
+  -e UDP_FWD_HOST=$UDP_FWD_HOST \
+  -e DEST_APP=$TCP_FWD_HOST \
+  -e DEST=$VM_IP 
+
+TUNNEL_HOST=$(wait_for_job tunnel)
+UDP_FWD_HOST=$TUNNEL_HOST
+
+# Now create the "client" app mentioned above
+ibmcloud ce jobrun submit -n udp-client \
+  --image $REGISTRY/sshtunnel-udp-client \
+  -e SERVER=$UDP_FWD_HOST:$UDP_PORT
+
+ibmcloud ce jobrun logs -n udp-client -raw -f

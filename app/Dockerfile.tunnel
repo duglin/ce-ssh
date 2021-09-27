@@ -1,0 +1,7 @@
+FROM alpine
+
+# Install just what's needed
+RUN apk add openssh curl
+
+COPY tunnel /
+CMD /tunnel

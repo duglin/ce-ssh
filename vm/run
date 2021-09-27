@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# Clean up previous run
+function clean() {
+  set +ex
+  echo Cleaning...
+  (
+  ibmcloud ce jobrun delete -n udp-service -f
+  ibmcloud ce jobrun delete -n vm -f
+  ibmcloud ce secret delete -n ssh-key -f
+  if which cekube ; then
+    cekube get pods | grep -e udp-service -e vm- | while read a b
+    do  
+      cekube delete pod $a --force --grace-period=0
+    done
+  fi
+  ) > /dev/null 2>&1
+}
+
+function wait_for_job() {
+  set +x +e
+  while true ; do
+    sleep 1
+    IP=$(ibmcloud ce jobrun get -n $1 \
+	     -o jsonpath="{.instances[0].status.podIP}" 2> /dev/null) || true
+    [[ -n "$IP" ]] && echo $IP && break
+  done
+  set -x -e
+}
+
+clean
+[[ "$1" == "clean" ]] && exit 0
+
+set -ex
+export REGISTRY=${REGISTRY:-duglin}
+export SERVICE_PORT=${SERVICE_PORT:-1234}
+export UDP_PORT=${UDP_PORT:-1234}
+
+# Setup a "service" job. This job would be running in the VM, but for our
+# purposes we'll be running it in our project.
+ibmcloud ce jobrun submit -n udp-service \
+  --image $REGISTRY/sshtunnel-udp-service \
+  -e CE_EXECUTION_MODE=DAEMON \
+  -e PORT=${SERVICE_PORT}
+SERVICE_IP=$(wait_for_job udp-service)
+
+# Create a CE job that will simulate a remote VM that we want to
+# tunnel to.  This job is really doing nothing more than running SSHD
+ibmcloud ce jobrun submit -n vm \
+  --image $REGISTRY/sshtunnel-vm \
+  -e CE_EXECUTION_MODE=DAEMON \
+  -e UDP_PORT=${UDP_PORT} \
+  -e SERVICE_IP=$SERVICE_IP \
+  -e SERVICE_PORT=$SERVICE_PORT
+
+# cekube expose pod tunnel-1-0 --target-port=8080 --name=tunnel-ha --port=8080 \
+  # --selector codeengine.cloud.ibm.com/job-run=tunnel  --protocol UDP
+
+VM_IP=$(wait_for_job vm)
+echo VM_IP: $VM_IP
+
+# Give the logs time to catch-up and then wait for the SSH key to appear
+sleep 2 # give logs time to catch up
+while ! ibmcloud ce jobrun logs -n vm | grep "END OPENSSH" > /dev/null 2>&1 ; do
+  sleep 1
+done
+
+# The 'vm' job will create a set of public/private ssh keys. We're going to
+# need the private one in order to make the ssh connection. So extract the
+# private key from the vm job logs. NEVER DO THIS OUTSIDE OF A DEMO!!
+ibmcloud ce jobrun logs -n vm --raw | \
+  sed -n "/BEGIN OPENSSH/,/END OPENSSH/{p;/END/q}" > key.priv
+sed -i -e 's/\x0d//g' key.priv
+sed -i -e 's/ *$//g' key.priv
+cat key.priv | base64 > key.priv.64
+
+# Create a secret with this key so our client side ssh/tunnel can use it
+ibmcloud ce secret create -n ssh-key --from-file id_rsa=key.priv.64
+rm -f key.priv key.priv.64

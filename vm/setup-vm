@@ -1,0 +1,44 @@
+#!/bin/sh
+
+set -ex
+
+# Edit our sshd config to allow root login, and port forwarding
+FILE=/etc/ssh/sshd_config
+sed -i "s/^.*PermitRootLogin.*/PermitRootLogin without-password/" $FILE
+sed -i "s/^.*PasswordAuthentication.*/PasswordAuthentication yes/" $FILE
+sed -i "s/^.*AllowTcpForwarding.*/AllowTcpForwarding yes/" $FILE
+# sed -i "s/^.*PermitOpen.*/PermitOpen any/" $FILE
+# sed -i "s/^.*UsePAM.*/UsePAM yes/" $FILE
+# echo "root:root" | chpasswd
+
+# Generate hostkeys (used by sshd) and our public/private ssh keys
+ssh-keygen -A
+ssh-keygen -N "" -t rsa -b 4096 -f /root/.ssh/id_rsa
+
+# NEVER DO THIS OUTSIDE OF A DEMO!
+# Put the private key into our logs so we can use it from a client
+set +x
+cat /root/.ssh/id_rsa
+sleep 1
+
+# Add public key we generated to the authorized keys so our client can connect
+cat /root/.ssh/id_rsa.pub > /root/.ssh/authorized_keys
+
+# Ensure everything has the right permissions. ssh is picky
+set -x
+chmod go-rwx /root/.ssh/*
+
+# Setup a TCP->UDP mapper if requested
+if [[ -n "$UDP_PORT" && -n "$SERVICE_IP" && -n "$SERVICE_PORT" ]]; then
+  mkfifo /tmp/fifo
+  while true ; do
+    nc -vlp $UDP_PORT < /tmp/fifo | nc -vu $SERVICE_IP $SERVICE_PORT > /tmp/fifo
+  done &
+fi
+
+# Finally start sshd
+# /usr/sbin/sshd -D -e
+mkdir /etc/dropbear
+while true ; do
+  dropbear -a -p 0.0.0.0:22  -R -F -E
+done

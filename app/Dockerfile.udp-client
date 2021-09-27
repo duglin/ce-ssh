@@ -1,0 +1,8 @@
+FROM golang:alpine
+COPY udp-client.go /
+RUN go build -o /udp-client /udp-client.go
+
+# Copy the exe into a smaller base image
+FROM alpine
+COPY --from=0 /udp-client /udp-client
+CMD /udp-client
